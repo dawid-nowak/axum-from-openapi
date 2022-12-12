@@ -1,5 +1,5 @@
 use multimap::MultiMap;
-use openapiv3::{Components, OpenAPI, Operation, ReferenceOr, RequestBody, Schema,Parameter};
+use openapiv3::{Components, OpenAPI, Operation, ReferenceOr, RequestBody, Parameter};
 use proc_macro2::TokenStream;
 use quote::quote;
 use serde_json;
@@ -25,6 +25,7 @@ struct EmptyReferenceProvider;
   
 trait ReferenceProvider{
     fn resolve_parameter(&self, name: &str, path: &str)->Option<ReferenceOr<Parameter>>;
+    fn resolve_request_body(&self, name: &str, path: &str)->Option<ReferenceOr<RequestBody>>;
 }
 
 impl ReferenceProvider for ComponentReferenceProvider{
@@ -36,17 +37,31 @@ impl ReferenceProvider for ComponentReferenceProvider{
             _ => None,
         }
     }
+
+    fn resolve_request_body(&self, name: &str, path: &str)->Option<ReferenceOr<RequestBody>>{	
+	match path {
+            "request_body" => {
+                self.components.request_bodies.get(name).cloned()
+            }
+            _ => None,
+        }
+    }
 }
 
 impl ReferenceProvider for EmptyReferenceProvider{
     fn resolve_parameter(&self, _name: &str, _path: &str)->Option<ReferenceOr<Parameter>>{
 	None
     }
+    fn resolve_request_body(&self, _name: &str, _path: &str)->Option<ReferenceOr<RequestBody>>{
+	None
+    }
 }
 
 
-fn parameter_reference_resolver(parameter: ReferenceOr<Parameter>, reference_provider:  &Box<dyn ReferenceProvider>)->Option<Parameter>{        
-    match parameter {
+fn reference_resolver<T,F>(request_body: ReferenceOr<T>, reference_provider: F )->Option<T>
+    where F: Fn(&str, &str)->Option<ReferenceOr<T>>
+{        
+    match request_body {
         ReferenceOr::Item(item) => Some(item),
         ReferenceOr::Reference { reference } => {
 	    	    	    
@@ -55,8 +70,8 @@ fn parameter_reference_resolver(parameter: ReferenceOr<Parameter>, reference_pro
             let maybe_component_name = parts.pop();
 
             if let (Some(name), Some(path)) = (maybe_name, maybe_component_name) {
-		if let Some(new_ref) = reference_provider.resolve_parameter(name, path){
-		    parameter_reference_resolver(new_ref, reference_provider)
+		if let Some(new_ref) = reference_provider(name, path){
+		    reference_resolver(new_ref, reference_provider)
 		}else{
 		    None
 		}
@@ -74,7 +89,9 @@ struct HandlerDescription {
     operation_id: String,
     method: http::method::Method,
     path: String,
-    path_params: Vec<String>
+    path_params: Vec<String>,
+    request_body: Option<RequestBody>
+	
     
 }
 
@@ -89,9 +106,13 @@ fn process_operation(
         println!("Path {path:?} {method} operation {operation_id:?}");
 
 	let mut path_params = vec![];
+
+	let ptr = |x:&str,y:&str|{
+	    reference_provider.resolve_parameter(x,y)
+	};
 	
-	for parameter in &operation.parameters{	    
-	    if let Some(parameter) = parameter_reference_resolver(parameter.clone(), reference_provider){
+	for parameter in &operation.parameters{
+	    if let Some(parameter) = reference_resolver(parameter.clone(), ptr){
 		match parameter{
 		    Parameter::Path{parameter_data,style: _} => {
 			path_params.push(parameter_data.name.to_case(Case::Snake));
@@ -101,12 +122,24 @@ fn process_operation(
 	    }	
 	}
 
+	let request_body = if let Some(request_body)= &operation.request_body{
+	    let ptr = |x:&str,y:&str|{
+		reference_provider.resolve_request_body(x,y)
+	    };
+	    reference_resolver(request_body.clone(), ptr)	    
+	}else{
+	    None
+	};
+	
+
 	
         let hd = HandlerDescription {
             operation_id: operation_id.to_case(Case::Snake),
             method,
             path: modify_path_template(&path),
-	    path_params
+	    path_params,
+	    request_body
+	    
         };
         let tag = if let Some(tag) = operation.tags.first() {
             tag.clone()
@@ -246,7 +279,6 @@ pub fn sanitize_and_save_to_dir(name:&str, dir:&str, tokens: TokenStream) {
 }
 
 pub fn generate_server(prefixes: Vec<String>, routers:Vec<Ident>)->TokenStream{
-
     let mod_names: Vec<String> = routers.iter().map(|k| format!("/{}.rs",k)).collect();
     quote!(	
 	use axum::Router;

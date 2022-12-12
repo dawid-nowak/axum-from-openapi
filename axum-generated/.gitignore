@@ -3,4 +3,5 @@
 *lock
 *.json
 *.yaml
+src/handlers
 
