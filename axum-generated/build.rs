@@ -1,5 +1,5 @@
 use std::env;
-use axum_openapi::generate;
+use axum_from_openapi::generate;
 fn main(){
 //    println!("cargo:rerun-if-changed={}","apis/");
     let out_dir = env::var("OUT_DIR").unwrap();
